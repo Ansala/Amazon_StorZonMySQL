@@ -1,107 +1,187 @@
-// Dependencies
-var mysql = require('mysql');
-var wrap = require('word-wrap');
-var Table = require('cli-table');
-var inquirer = require('inquirer');
-var colors = require('colors');
+// npm requirements
+var inquirer = require("inquirer");
+var mysql = require("mysql");
+var consoleTableNPM = require("console.table");
 
-// sets connection param for database connection
+
+// create mysql connection
 var connection = mysql.createConnection({
-    host: "localhost",
-    port: 3306,
-    user: "root",
-    password: "yourRootPassword",
-    database: "Stores"
+	host: "localhost",
+	port: 3306,
+	user: "root",
+	password: "yourRootPassword",
+	database: "bamazon_db"
 });
 
-// makes connection with the server
-connection.connect(function (err) {
-    if (err) throw err;
-    console.log("connected as id " + connection.threadId);
-    itemsForSale();
+// connect to db
+connection.connect(function(error){
+	if (error) throw error;
+	// welcome customer
+	console.log("\n-----------------------------------------------------------------" 
+		+ "\nWelcome to Bamazon! Check out what we've got for you!\n" 
+		+ "-----------------------------------------------------------------\n");
+	// start the app
+	welcome();
 });
 
-// A query which returns all items available for sale ().
-function itemsForSale() {
-    connection.query("SELECT item_id, product_name, price, department_name FROM products WHERE price > 0;", function (err, result) {
-        // gets and builds the table header
-        var obj = result[0];
-        var header = [];
-        for (var prop in obj) {
-            header.push(prop);
-        }
-
-        // instantiate 
-        var table = new Table({
-            head: header,
-            colWidths: [20, 55, 10, 20]
-        });
-
-        // gets and sets the data in the table
-        var item_ids = [];
-        for (var i = 0; i < result.length; i++) {
-            item_ids.push(result[i].item_id);
-            table.push([result[i].item_id, wrap(result[i].product_name), result[i].price.toFixed(2), result[i].department_name]);
-        }
-        var output = table.toString();
-        console.log(output);
-        purchaseItem(item_ids);
-    });
+// initial screen upon app open
+function welcome() {
+	// ask customer what they'd like to do
+	inquirer.prompt([
+		{
+			name: "action",
+			type: "list",
+			choices: ["View items for sale", "Leave the store"],
+			message: "Please select what you would like to do."
+		}
+	]).then(function(action) {
+		// if user wants to view items, run the view items function
+		if (action.action === "View items for sale") {
+			viewItems();
+			// if user wants to leave, run exit function
+		} else if (action.action === "Leave the store") {
+			exit();
+		}
+	});
 }
 
-// sets function for cutomer to make a purchase
-// list gets the items id's as an array and passed to the promt/choices param
-function purchaseItem(list) {
-    inquirer
-        .prompt([{
-            name: "buy",
-            type: "list",
-            message: "What would you like to purchase?",
-            choices: list
-        },
-        {
-            name: "quantity",
-            type: "input",
-            message: "what quantity?",
-        }])
-        .then(function (answer) {
-            // sets a query to select the item the user has chosen
-            var query = "SELECT item_id, stock_quantity, price FROM products WHERE ?";
-            connection.query(query, { item_id: answer.buy }, function (err, res) {
-                // console.log(res);
-                var inputQuantity = answer.quantity;
-                checkStock(res[0].stock_quantity, inputQuantity, res[0].price.toFixed(2), res[0].item_id);
-            });
-        })
+// view items function
+function viewItems() {
+	// save my sql query
+	var query = "SELECT * FROM products";
+	// query db display results
+	connection.query(query, function(error, results) {
+		// if error, tell us
+		if (error) throw error;
+		// call the console table function to build/display the items table
+		consoleTable(results);
+		// ask customer what they'd like to buy and how much qty
+		inquirer.prompt([
+			{
+				name: "id",
+				message: "Please enter the ID of the item that you would like to purchase.",
+				// validates that the id is a number greater than 0 and less than/equal to 
+				// the number of items
+				validate: function(value) {
+					if (value > 0 && isNaN(value) === false && value <= results.length) {
+						return true;
+					}
+					return false;
+				}
+			},
+			{
+				name: "qty",
+				message: "What quantity would you like to purchase?",
+				// validate the quantity is a number larger than 0
+				validate: function(value) {
+					if (value > 0 && isNaN(value) === false) {
+						return true;
+					}
+					return false;
+				}
+			}
+		]).then(function(transaction) {
+			// init itemQty, itemPrice, itemName vars
+			var itemQty;
+			var itemPrice;
+			var itemName;
+			var productSales;
+			// set above vars equal to results where the user id matches db id
+			for (var j = 0; j < results.length; j++) {
+				if (parseInt(transaction.id) === results[j].item_id) {
+					itemQty = results[j].stock_quantity;
+					itemPrice = results[j].price;
+					itemName = results[j].product_name;
+					productSales = results[j].product_sales;
+				}
+			}
+			// if user tries to buy more qty than db has available, tell them no, run the
+			// welcome function again
+			if (parseInt(transaction.qty) > itemQty) {
+				console.log("\nInsufficient inventory for your requested quantity. We have " 
+					+ itemQty + " in stock. Try again.\n");
+				welcome();
+			} 
+			// if user tries to buy equal/less qty than db has available, tell them yes,
+			// update the db to reduce qty by customer purchase amt, update product sales
+			// with revenue from the sale
+			else if (parseInt(transaction.qty) <= itemQty) {
+				console.log("\nCongrats! You successfully purchased " + transaction.qty 
+					+ " of " + itemName + ".");
+				lowerQty(transaction.id, transaction.qty, itemQty, itemPrice);
+				salesRevenue(transaction.id, transaction.qty, productSales, itemPrice);
+			}
+		});
+	});
 }
 
-// checks quantity against the stock
-function checkStock(on_stock, buy_quantity, price, item_id) {
-    if (on_stock >= buy_quantity) {
-        var total_price = buy_quantity * price;
-        console.log(`Your total amount is $${total_price}.\nThank you for choosing STORZON!`.green);
-        // updates database
-        updateStock(buy_quantity, item_id);
-    } else {
-        console.log(`Low stock!\nOnly ${on_stock} items on stock!`.red);
-        connection.end();
-    }
+// function for building the items table for customers to view
+function consoleTable(results) {
+	// create empty values array
+	var values = [];
+	// loop through all results
+	for (var i = 0; i < results.length; i++) {
+		// create resultObject for each iteration. properties of object will be column
+		// headings in the console table
+		var resultObject = {
+			ID: results[i].item_id,
+			Item: results[i].product_name,
+			Price: "$" + results[i].price
+		};
+		// push result object to values array
+		values.push(resultObject);
+	}
+	// create table with title items for sale with the values array
+	console.table("\nItems for Sale", values);
 }
 
-// updates stock_quantity in the database
-function updateStock(quantity, item_id) {
-    var query = "UPDATE products SET stock_quantity = stock_quantity - ? WHERE ?";
-    connection.query(
-        query,
-        [
-            quantity,
-            {
-                item_id: item_id
-            }
-        ],
-        function (error) {
-            if (error) throw error;
-            console.log("DB succefully updated!");
-            connection.end();
-        });
+// reduce stock qty function
+function lowerQty(item, purchaseQty, stockQty, price) {
+	// query with an update, set stock equal to stockqty - purchase qty
+	// where the item_id equals the id the user entered
+	connection.query(
+		"UPDATE products SET ? WHERE ?", 
+		[
+			{
+				stock_quantity: stockQty - parseInt(purchaseQty)
+			},
+			{
+				item_id: parseInt(item)
+			}
+		],
+		// throw error if error, else run displayCost
+		function(error, response) {
+			if (error) throw error;
+	});
+}
+
+// add sales rev function
+function salesRevenue(item, purchaseQty, productSales, price) {
+	var customerCost = parseInt(purchaseQty) * price;
+	// query with an update, set product rev equal to current product sales + 
+	// purchase qty * price where the item id equals the id the user entered
+	connection.query(
+		"UPDATE products SET ? WHERE ?", 
+		[
+			{
+				product_sales: productSales + customerCost
+			}, 
+			{
+				item_id: parseInt(item)
+			}
+		], 
+		function(error, response) {
+			if (error) throw error;
+			// log it fixed to 2 decimals to tell customer what their price was
+			console.log("The total price is $" + customerCost.toFixed(2) 
+				+ ". Gotta love no sales tax. Thanks for you purchase!\n");
+			// run welcome function
+			welcome();
+	});
+}
+
+// exit function says bye to user and ends db connection
+function exit() {
+	console.log("\nThanks for stopping by! Have a good day.");
+	connection.end();
 }
